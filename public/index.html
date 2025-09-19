@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Redis Demo - Retail Analytics</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;color:#333}
+    .container{max-width:1200px;margin:0 auto;padding:20px}
+    .header{text-align:center;margin-bottom:40px;color:white}
+    .header h1{font-size:3rem;margin-bottom:10px;text-shadow:2px 2px 4px rgba(0,0,0,.3)}
+    .header p{font-size:1.1rem;opacity:.9}
+    .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-bottom:24px}
+    .btn{background:linear-gradient(45deg,#ff6b6b,#ee5a24);color:white;border:none;padding:12px 18px;border-radius:10px;font-size:0.95rem;font-weight:600;cursor:pointer;transition:.2s;box-shadow:0 4px 15px rgba(0,0,0,.2)}
+    .btn:hover{transform:translateY(-1px)}
+    .btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
+    .btn.load-data{background:linear-gradient(45deg,#4ecdc4,#44a08d)}
+    .btn.report{background:linear-gradient(45deg,#667eea,#764ba2)}
+    .btn.stats{background:linear-gradient(45deg,#f093fb,#f5576c)}
+    .btn.clear{background:linear-gradient(45deg,#ffecd2,#fcb69f);color:#333}
+    .loading{display:none;text-align:center;margin:12px 0;color:white}
+    .spinner{border:3px solid rgba(255,255,255,.3);border-radius:50%;border-top:3px solid white;width:28px;height:28px;animation:spin 1s linear infinite;margin:0 auto 8px}
+    @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+    .toast{display:none;margin:10px 0;padding:12px 14px;border-radius:8px;color:#fff}
+    .toast.success{background:#2ecc71}
+    .toast.error{background:#e74c3c}
+    .results{background:white;border-radius:12px;padding:22px;box-shadow:0 10px 30px rgba(0,0,0,.2);min-height:120px}
+    .results h2{color:#667eea;margin-bottom:12px;font-size:1.6rem}
+    .subtle{color:#666;margin:4px 0 12px 0}
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:12px 0 18px}
+    .stat-card,.card{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:16px;border-radius:10px;text-align:center}
+    .stat-card h3{font-size:1.6rem;margin-bottom:4px}
+    .table{width:100%;border-collapse:collapse;margin-top:12px}
+    .table th,.table td{padding:10px;text-align:left;border-bottom:1px solid #e6e6e6;vertical-align:top}
+    .table th{background:#f8f9fa;font-weight:600;color:#667eea}
+    .redis-info{background:#2c3e50;color:white;padding:16px;border-radius:10px;margin-top:10px;font-family:'Courier New',monospace}
+    .redis-info h3{color:#3498db;margin-bottom:10px}
+    .redis-stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #34495e}
+    .redis-stat:last-child{border-bottom:none}
+    .cart{background:#f8f9fa;padding:10px;border-radius:10px;margin:12px 0}
+    .cart-h{display:flex;gap:12px;align-items:center;margin-bottom:6px}
+    .tight td,.tight th{padding:6px 8px}
+    @media (max-width:768px){.header h1{font-size:2rem}.controls{grid-template-columns:1fr}.container{padding:12px}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Redis Caching Demo</h1>
+      <p>Testing Speed of Caching for Retail Analytics & Data Management Platform</p>
+    </div>
+
+    <div class="controls">
+      <button id="btnLoad" class="btn load-data" onclick="loadSampleData()">Load Sample Data</button>
+      <button class="btn report" onclick="getRetailReport()">Run Retail Report</button>
+      <button class="btn report" onclick="getPopularItems()">Popular Items</button>
+      <button class="btn report" onclick="getActiveShoppers()">Active Shoppers</button>
+      <button class="btn stats"  onclick="getRedisStats()">Redis Statistics</button>
+      <button class="btn report" onclick="getRetailReportCached()">⚡ Retail Report (Cached)</button>
+      <button class="btn report" onclick="getPopularItemsCached()">⚡ Popular Items (Cached)</button>
+      <button class="btn report" onclick="getActiveShoppersCached()">⚡ Active Shoppers (Cached)</button>
+      <button class="btn clear"  onclick="clearData()">Clear All Data</button>
+      <button class="btn stats"  onclick="compareRetailReport()">Compare: No-Cache vs Cached</button>
+    </div>
+
+    <div class="loading" id="loading">
+      <div class="spinner"></div>
+      <p>Processing request...</p>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <div class="results" id="results">
+      <p class="subtle">Use the buttons above to run a query.</p>
+    </div>
+  </div>
+
+  <script>
+    // ---------- ONE set of helpers ONLY ----------
+    const API_BASE = '/api';
+    // Use 0 days to include all demo data; tweak limit where it makes sense
+    const DEFAULT_SINCE = 0;
+    const DEFAULT_LIMIT = 10;
+    const q = (p={}) => {
+      const u = new URLSearchParams(p);
+      return `?${u.toString()}`;
+    };
+
+    function showLoading() {
+      document.getElementById('loading').style.display = 'block';
+      hideToast();
+    }
+    function hideLoading() {
+      document.getElementById('loading').style.display = 'none';
+    }
+    function showToast(msg, type='success') {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = `toast ${type}`;
+      t.style.display = 'block';
+      setTimeout(hideToast, 2800);
+    }
+    function hideToast() {
+      const t = document.getElementById('toast');
+      t.style.display = 'none';
+    }
+    function showResults(html) {
+        const r = document.getElementById('results');
+        const c = document.getElementById('results-content');
+        if (c) {
+        c.innerHTML = html;
+        } else {
+        // fallback if results-content isn’t present
+        r.innerHTML = html;
+        }
+        r.classList.add('show');  // ← this makes the panel visible
+    }
+
+    function fmtMoney(n) { return `$${Number(n || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`; }
+    function fmtInt(n) { return Number(n || 0).toLocaleString(); }
+    function safe(s){ return (s ?? '').toString(); }
+
+    async function makeRequest(path, method='GET', body) {
+      showLoading();
+      try {
+        const res = await fetch(`${API_BASE}${path}`, {
+          method,
+          headers: {'Content-Type': 'application/json'},
+          body: body ? JSON.stringify(body) : undefined
+        });
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+          const text = await res.text().catch(()=> '');
+          throw new Error(`Unexpected response: ${res.status} ${res.statusText} ${text.slice(0,120)}`);
+        }
+        const data = await res.json();
+        if (!res.ok || data?.success === false) {
+          throw new Error(data?.error || `HTTP ${res.status} ${res.statusText}`);
+        }
+        return data;
+      } catch (e) {
+        showToast(String(e.message || e), 'error');
+        throw e;
+      } finally {
+        hideLoading();
+      }
+    }
+
+    // ---------- Buttons ----------
+    async function loadSampleData(){
+      const btn = document.getElementById('btnLoad');
+      const prev = btn.innerText; btn.disabled = true; btn.innerText = 'Loading…';
+      try {
+        const data = await makeRequest('/redis/load-sample-data', 'POST', {
+          customers_csv:'datafiles/customers_with_id.csv',
+          transactions_csv:'datafiles/transactions.csv',
+          reset:true
+        });
+        showToast(data.message || 'Loaded.', 'success');
+        // quick summary
+        const s = data.stats || {};
+        showResults(`
+          <h2>✅ Sample Data Loaded</h2>
+          <div class="stats-grid">
+            <div class="stat-card"><h3>${fmtInt(s.customers_loaded)}</h3><p>Customers</p></div>
+            <div class="stat-card"><h3>${fmtInt(s.transactions_loaded)}</h3><p>Transactions</p></div>
+            <div class="stat-card"><h3>${fmtInt(s.active_shoppers)}</h3><p>Active Shoppers</p></div>
+          </div>
+        `);
+      } finally {
+        btn.disabled = false; btn.innerText = prev;
+      }
+    }
+
+    async function compareRetailReport(){
+      try{
+        const qs = q({since_days: DEFAULT_SINCE, limit: DEFAULT_LIMIT});
+        const uncached = await makeRequest(`/retail-report${qs}`);
+        const cached   = await makeRequest(`/retail-report-cached${qs}`);
+        const speedup = Math.max(1, Math.round((uncached.elapsed_ms||1)/Math.max(1,cached.elapsed_ms||1)));
+        const html = `
+          <div class="stats-grid" style="gap:12px">
+            <div class="stat-card"><h3 style="margin:0">${uncached.elapsed_ms} ms</h3><p style="margin:.25rem 0;color:white">No-Cache (server)</p></div>
+            <div class="stat-card"><h3 style="margin:0">${cached.elapsed_ms} ms</h3><p style="margin:.25rem 0;color:white">Cached (server)</p></div>
+            <div class="stat-card"><h3 style="margin:0">${speedup}×</h3><p style="margin:.25rem 0;color:white">Speedup</p></div>
+          </div>
+          <p><small>Cached=${cached.cached}; TTL=${Number.isFinite(cached.ttl_seconds)?cached.ttl_seconds:'—'}s</small></p>`;
+        showResults(`<h2>🆚 Retail Report: No-Cache vs Cached</h2>${html}`);
+      }catch(e){}
+    }   
+
+    async function getRedisStats(){
+      const data = await makeRequest('/redis-stats');
+      const s = data.redis_stats || {};
+      let html = '<h2>⚡ Redis Instance Statistics</h2>';
+      html += '<div class="redis-info"><h3>📊 Performance Metrics</h3>';
+      html += row('Redis Version', s.redis_version);
+      html += row('Connected Clients', fmtInt(s.connected_clients));
+      html += row('Memory Used', s.used_memory_human);
+      html += row('Total Commands', fmtInt(s.total_commands_processed));
+      html += row('Keyspace Hits', fmtInt(s.keyspace_hits));
+      html += row('Keyspace Misses', fmtInt(s.keyspace_misses));
+      html += row('Uptime', `${Math.floor((s.uptime_in_seconds||0)/3600)} hours`);
+      html += row('Database Keys', fmtInt(s.db_keys));
+      html += '</div>';
+      showResults(html);
+      function row(k,v){return `<div class="redis-stat"><span>${k}:</span><span>${v ?? '—'}</span></div>`;}
+    }
+
+    // Retail report
+    async function getRetailReport(){
+      try{
+      const data = await makeRequest(`/retail-report${q({since_days: DEFAULT_SINCE, limit: DEFAULT_LIMIT})}`);
+      renderRetailReport('📈 Retail Report', data);
+     }catch(e){}
+    }
+
+    async function getRetailReportCached(){
+      try{
+        const data = await makeRequest(`/retail-report-cached${q({since_days: DEFAULT_SINCE, limit: DEFAULT_LIMIT})}`);
+        renderRetailReport('📈 Retail Report (Cached)', data);
+      }catch(e){}
+    }
+    function renderRetailReport(title, payload){
+      const report = payload.report || {};
+      const sum = report.summary || {};
+      const top = Array.isArray(report.top_clients) ? report.top_clients : [];
+      const carts = Array.isArray(report.shopping_carts) ? report.shopping_carts : [];
+
+      let h = `<h2>${title}</h2>`;
+      h += `<p class="subtle">Elapsed: ${fmtInt(payload.elapsed_ms)} ms${payload.cached!==undefined ? ` • Cache: ${payload.cached?'HIT':'MISS'}${Number.isFinite(payload.ttl_seconds)?' • TTL: '+payload.ttl_seconds+'s':''}`:''}</p>`;
+      h += `<div class="stats-grid">
+              <div class="stat-card"><h3>${fmtInt(sum.total_active_shoppers)}</h3><p>Active Shoppers</p></div>
+              <div class="stat-card"><h3>${fmtMoney(sum.total_cart_value)}</h3><p>Total Cart Value</p></div>
+              <div class="stat-card"><h3>${fmtMoney(sum.average_cart_value)}</h3><p>Average Cart Value</p></div>
+            </div>`;
+
+      h += '<h3>🏆 Top Customers</h3>';
+      h += '<table class="table"><thead><tr><th>Name</th><th>Email</th><th>Purchases</th><th>Total Spent</th></tr></thead><tbody>';
+      top.forEach(c=>{
+        h += `<tr>
+                <td><a href="#" onclick="drillCustomer('${c.user_id}');return false;">${safe(c.name)}</a></td>
+                <td>${safe(c.email)}</td>
+                <td>${fmtInt(c.total_purchases)}</td>
+                <td>${fmtMoney(c.total_spent)}</td>
+              </tr>`;
+      });
+      h += '</tbody></table>';
+
+      h += '<h3>🛒 Active Shopping Carts</h3>';
+      carts.forEach(cart=>{
+        const items = Array.isArray(cart.items)?cart.items:[];
+        h += `<div class="cart">
+                <div class="cart-h"><strong>${safe(cart.client_name)}</strong>
+                  <span>• ${fmtInt(cart.items_count)} items</span>
+                  <span>• ${fmtMoney(cart.cart_value)}</span>
+                </div>
+                <table class="table tight">
+                  <thead><tr><th>Item</th><th>Category</th><th>Qty</th><th>Avg Price</th></tr></thead>
+                  <tbody>
+                    ${items.map(i=>`
+                      <tr>
+                        <td>${safe(i.name)}</td>
+                        <td>${safe(i.category)}</td>
+                        <td>${fmtInt(i.quantity)}</td>
+                        <td>${fmtMoney(i.price)}</td>
+                      </tr>`).join('')}
+                  </tbody>
+                </table>
+              </div>`;
+      });
+
+      showResults(h);
+    }
+
+    // Active shoppers
+    async function getActiveShoppers(){
+      try{
+        const data = await makeRequest('/active-shoppers?limit=1200&since_days=0');
+        renderActive('👥 Active Shoppers', data);
+      }catch(e){}
+    }
+
+    async function getActiveShoppersCached(){
+      try{
+        const data = await makeRequest('/active-shoppers-cached?limit=1200&since_days=0');
+        renderActive('👥 Active Shoppers (Cached)', data);
+      }catch(e){}
+    }
+
+    function renderActive(title, payload){
+      const rows = Array.isArray(payload.active_shoppers)?payload.active_shoppers:[];
+      let h = `<h2>${title}</h2>`;
+      h += `<p class="subtle">Total: ${fmtInt(payload.total_count ?? rows.length)} • Elapsed: ${fmtInt(payload.elapsed_ms)} ms${payload.cached!==undefined ? ` • Cache: ${payload.cached?'HIT':'MISS'}`:''}</p>`;
+      h += '<table class="table"><thead><tr><th>Name</th><th>Email</th><th>Cart Items</th><th>Cart Value</th><th>Last Active</th></tr></thead><tbody>';
+      rows.forEach(s=>{
+        const last = s.last_active ? new Date(s.last_active).toLocaleString() : '';
+        h += `<tr>
+                <td><a href="#" onclick="drillCustomer('${s.user_id}');return false;">${safe(s.name)}</a></td>
+                <td>${safe(s.email)}</td>
+                <td>${fmtInt(s.cart_items_count)}</td>
+                <td>${fmtMoney(s.cart_value)}</td>
+                <td>${last}</td>
+              </tr>`;
+      });
+      h += '</tbody></table>';
+      showResults(h);
+    }
+
+    // Popular items
+    async function getPopularItems(){
+      try{
+        const data = await makeRequest(`/popular-items${q({since_days: DEFAULT_SINCE, limit: DEFAULT_LIMIT})}`);
+        renderPopular('🔥 Popular Items (No Cache)', data);
+      }catch(e){}
+    }
+
+    async function getPopularItemsCached(){
+      try{
+        const data = await makeRequest(`/popular-items-cached${q({since_days: DEFAULT_SINCE, limit: DEFAULT_LIMIT})}`);
+        renderPopular('🔥 Popular Items (Cached)', data);
+      }catch(e){}
+    }
+
+    function renderPopular(title, payload){
+      const items = Array.isArray(payload.popular_items)?payload.popular_items:[];
+      let h = `<h2>${title}</h2>`;
+      h += `<p class="subtle">Elapsed: ${fmtInt(payload.elapsed_ms)} ms${payload.cached!==undefined ? ` • Cache: ${payload.cached?'HIT':'MISS'}${Number.isFinite(payload.ttl_seconds)?' • TTL: '+payload.ttl_seconds+'s':''}`:''}</p>`;
+      h += '<table class="table"><thead><tr><th>Name</th><th>Category</th><th>Price</th><th>Purchases</th></tr></thead><tbody>';
+      items.forEach(it=>{
+        h += `<tr>
+                <td>${safe(it.name)}</td>
+                <td>${safe(it.category)}</td>
+                <td>${fmtMoney(it.price)}</td>
+                <td>${fmtInt(it.purchase_count)}</td>
+              </tr>`;
+      });
+      h += '</tbody></table>';
+      showResults(h);
+    }
+
+    // Drill-down
+    async function drillCustomer(userId){
+      const data = await makeRequest(`/customers/${encodeURIComponent(userId)}?since_days=0`);
+      const c = data.customer || {};
+      const tx = Array.isArray(data.transactions)?data.transactions:[];
+      let h = `<h2>👤 ${safe(c.name)} <small>${safe(c.email)}</small></h2>`;
+      h += `<p class="subtle">Transactions: ${fmtInt(tx.length)} • Elapsed: ${fmtInt(data.elapsed_ms)} ms${data.cached!==undefined ? ` • Cache: ${data.cached?'HIT':'MISS'}${Number.isFinite(data.ttl_seconds)?' • TTL: '+data.ttl_seconds+'s':''}`:''}</p>`;
+      h += '<table class="table"><thead><tr><th>When</th><th>Item</th><th>Qty</th><th>Unit</th><th>Total</th></tr></thead><tbody>';
+      tx.forEach(t=>{
+        h += `<tr>
+                <td>${t.timestamp ? new Date(t.timestamp).toLocaleString() : '-'}</td>
+                <td>${safe(t.item)}</td>
+                <td>${fmtInt(t.quantity)}</td>
+                <td>${fmtMoney(t.unit_price)}</td>
+                <td>${fmtMoney(t.total_price)}</td>
+              </tr>`;
+      });
+      h += '</tbody></table>';
+      showResults(h);
+    }
+
+    // Clear data
+    async function clearData(){
+      if(!confirm('Are you sure you want to clear all data from DB + Redis?')) return;
+      const data = await makeRequest('/clear-data','POST');
+      showToast(data.message || 'Cleared.', 'success');
+      showResults('<h2>🧹 Data cleared</h2><p class="subtle">DB and Redis caches have been reset.</p>');
+    }
+
+    // Expose for inline onclick
+    window.loadSampleData = loadSampleData;
+    window.getRedisStats = getRedisStats;
+    window.getRetailReport = getRetailReport;
+    window.getRetailReportCached = getRetailReportCached;
+    window.getActiveShoppers = getActiveShoppers;
+    window.getActiveShoppersCached = getActiveShoppersCached;
+    window.getPopularItems = getPopularItems;
+    window.getPopularItemsCached = getPopularItemsCached;
+    window.drillCustomer = drillCustomer;
+
+    // Default view
+    window.addEventListener('load', getRedisStats);
+  </script>
+</body>
+</html>
