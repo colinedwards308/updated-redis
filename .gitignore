@@ -1,2 +1,39 @@
-/.DS_Store
-/venv
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+.env
+.venv/
+venv/
+*.sqlite3
+
+# Data / generated
+datafiles/*.csv
+datafiles/*.jsonl
+datafiles/*.parquet
+
+# Node / front-end
+node_modules/
+
+# VSCode / IDE
+.vscode/
+.idea/
+
+# Docker
+*.log
+*.pid
+
+# OS cruft
+.DS_Store
+
+# Secrets (best: use env vars / secret manager)
+*.pem
+*.key
+*.crt
+
+# Byte-compiled
+*.egg-info/
+dist/
+build/

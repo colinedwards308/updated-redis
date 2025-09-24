@@ -3,6 +3,7 @@ import uuid, random, math
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import os
 
 rng = random.Random(42)
 
@@ -15,8 +16,9 @@ SRC_TX        = DATA / "transactions.csv"
 OUT_CUSTOMERS = DATA / "customers_expanded.csv"     # outputs
 OUT_TX        = DATA / "transactions_expanded.csv"
 
-TARGET_CUSTOMERS = 20_000          # ~20k customers
-TX_PER_CUSTOMER  = 5               # ~5 transactions each, on average
+TARGET_CUSTOMERS = 100_000          # ~20k customers
+MIN_TX_PER_CUSTOMER = 5            # minimum transactions per customer
+MAX_TX_PER_CUSTOMER = 20           # maximum transactions per customer
 
 # ---------------- helpers ----------------
 def colmap(df):
@@ -56,8 +58,8 @@ def jitter_name(name: str) -> str:
     return f"{name}{rng.randint(1, 9999)}"
 
 def synth_time():
-    """Random UTC time within last 90 days, ISO 8601 Z-suffixed."""
-    days_back = rng.randint(0, 90)
+    """Random UTC time within last 30 days, ISO 8601 Z-suffixed."""
+    days_back = rng.randint(0, 30)  # Changed from 90 to 30 days
     seconds = rng.randint(0, 24*3600-1)
     dt = datetime.now(timezone.utc) - timedelta(days=days_back, seconds=seconds)
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -189,12 +191,26 @@ cust_lookup = {
 cust_ids = list(cust_lookup.keys())
 cust_n = len(cust_ids)
 
-# --------- normalize TRANSACTIONS to canonical schema ----------
+# --------- IMPROVED TRANSACTION GENERATION ----------
+# First, parse the source transaction data to get column mappings
+# --------- CONFIG FOR DISTINCT ACTIVE USERS ----------
+ACTIVE_CUSTOMERS = int(os.getenv("ACTIVE_CUSTOMERS", "10000"))  # how many distinct shoppers get tx
+MIN_TX_PER_CUSTOMER = int(os.getenv("MIN_TX_PER_CUSTOMER", "3"))
+MAX_TX_PER_CUSTOMER = int(os.getenv("MAX_TX_PER_CUSTOMER", "8"))
+DAYS_BACK_MAX = int(os.getenv("DAYS_BACK_MAX", "30"))  # recent window for timestamps
+
+def synth_time(days_back_max=DAYS_BACK_MAX):
+    days_back = rng.randint(0, max(1, days_back_max))
+    seconds = rng.randint(0, 24*3600-1)
+    dt = datetime.now(timezone.utc) - timedelta(days=days_back, seconds=seconds)
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+# --------- parse tx templates (unchanged idea, slightly hardened) ----------
 tx = tx_src.copy()
 
 t_txid   = pick(tx, "transaction_id", "id")
 t_ts     = pick(tx, "timestamp", "time", "ts", "date")
-t_uid    = pick(tx, "user_id", "customer_id", "id")  # we'll overwrite anyway
+t_uid    = pick(tx, "user_id", "customer_id", "id")
 t_fn     = pick(tx, "first_name", "firstname", "first")
 t_ln     = pick(tx, "last_name", "lastname", "last")
 t_email  = pick(tx, "email", "e-mail")
@@ -204,102 +220,77 @@ t_cat2   = pick(tx, "category_l2", "cat_l2", "category2")
 t_cat3   = pick(tx, "category_l3", "cat_l3", "category3")
 t_qty    = pick(tx, "quantity", "qty")
 t_unit   = pick(tx, "unit_price", "price")
-t_total  = pick(tx, "total_price", "total")
 
-# Ensure numeric-ish cols are floats/ints where needed (used for jittering)
-if t_qty:  tx[t_qty]  = pd.to_numeric(tx[t_qty],  errors="coerce")
-if t_unit: tx[t_unit] = pd.to_numeric(tx[t_unit], errors="coerce")
-if t_total:tx[t_total]= pd.to_numeric(tx[t_total],errors="coerce")
+if len(tx) == 0:
+    tx_template = [{
+        "category_l1": "GROCERY",
+        "category_l2": "GENERAL",
+        "category_l3": "Misc Item",
+        "quantity": 1,
+        "unit_price": 5.99,
+    }]
+else:
+    tx_template = []
+    for _, row in tx.iterrows():
+        template = {
+            "category_l1": (row.get(t_cat1) or "GROCERY"),
+            "category_l2": (row.get(t_cat2) or "GENERAL"),
+            "category_l3": (row.get(t_cat3) or "Item"),
+            "quantity": max(1, safe_int(row.get(t_qty, "1"), default=1)),
+            "unit_price": max(0.01, safe_float(row.get(t_unit, "1.99"), default=1.99)),
+        }
+        tx_template.append(template)
 
-# Target rows
-TARGET_TX = max(len(tx), cust_n * TX_PER_CUSTOMER)
+print(f"Using {len(tx_template)} transaction templates")
 
-# Expand / synthesize transactions by sampling source and reassigning user_id
-mult = math.ceil(TARGET_TX / max(1, len(tx))) if len(tx) else 1
+# --------- choose ACTIVE_CUSTOMERS distinct users ----------
+active_n = min(ACTIVE_CUSTOMERS, len(cust_ids))
+active_ids = rng.sample(cust_ids, active_n)  # guarantees uniqueness
+
+# --------- generate transactions for those users ----------
 tx_rows = []
+total_transactions_generated = 0
 
-for m in range(mult):
-    if len(tx) == 0:
-        # create a tiny seed if source file is empty
-        chunk = pd.DataFrame([{
-            (t_cat1 or "category_l1"): "GROCERY",
-            (t_cat2 or "category_l2"): "GENERAL",
-            (t_cat3 or "category_l3"): "Misc Item",
-            (t_qty  or "quantity"): 1,
-            (t_unit or "unit_price"): round(1.0 + rng.random()*9.0, 2),
-        }])
-    else:
-        chunk = tx.sample(frac=1.0, replace=True, random_state=42 + m).copy()
+for i, customer_id in enumerate(active_ids, 1):
+    num_transactions = rng.randint(MIN_TX_PER_CUSTOMER, MAX_TX_PER_CUSTOMER)
+    customer_info = cust_lookup[customer_id]
 
-    # Ensure canonical fields exist in the chunk
-    for need in [t_cat1 or "category_l1", t_cat2 or "category_l2", t_cat3 or "category_l3"]:
-        if need not in chunk.columns:
-            chunk[need] = ""
+    for _ in range(num_transactions):
+        template = rng.choice(tx_template)
+        qty = max(1, template["quantity"] + rng.randint(-1, 2))
+        unit = round(template["unit_price"] * (0.8 + 0.4 * rng.random()), 2)
 
-    # Assign a real customer to each row and copy customer fields
-    user_ids = [cust_ids[rng.randrange(cust_n)] for _ in range(len(chunk))]
-    chunk["user_id"] = user_ids  # canonical
+        tx_row = {
+            "transaction_id": str(uuid.uuid4()),
+            "timestamp": synth_time(),
+            "user_id": customer_id,
+            "first_name": customer_info.get("first_name", ""),
+            "last_name":  customer_info.get("last_name", ""),
+            "email":      customer_info.get("email", ""),
+            "address":    customer_info.get("address", ""),
+            "category_l1": template["category_l1"],
+            "category_l2": template["category_l2"],
+            "category_l3": template["category_l3"],
+            "quantity": qty,
+            "unit_price": unit,
+        }
+        tx_row["total_price"] = round(qty * unit, 2)
+        tx_rows.append(tx_row)
+        total_transactions_generated += 1
 
-    # Customer details
-    chunk["first_name"] = [cust_lookup[uid]["first_name"] for uid in user_ids]
-    chunk["last_name"]  = [cust_lookup[uid]["last_name"]  for uid in user_ids]
-    chunk["email"]      = [cust_lookup[uid]["email"]      for uid in user_ids]
-    chunk["address"]    = [cust_lookup[uid]["address"]    for uid in user_ids]
+    if i % 1000 == 0:
+        print(f"  generated for {i}/{active_n} customers…")
 
-    # Quantity / unit_price / total_price
-    if t_qty:
-        chunk["quantity"] = chunk[t_qty].apply(lambda q: int(max(1, round(float(q)) if pd.notna(q) else 1)))
-    else:
-        chunk["quantity"] = 1
+print(f"Generated {total_transactions_generated} transactions for {active_n} distinct customers")
 
-    if t_unit:
-        chunk["unit_price"] = chunk[t_unit].apply(lambda p: round((float(p) if pd.notna(p) else 1.0) * (0.9 + 0.2 * rng.random()), 2))
-    else:
-        chunk["unit_price"] = round(1.0 + rng.random() * 9.0, 2)
-
-    chunk["total_price"] = (chunk["unit_price"].astype(float) * chunk["quantity"].astype(int)).round(2)
-
-    # Set categories to canonical names if needed
-    if t_cat1 and t_cat1 != "category_l1": chunk.rename(columns={t_cat1: "category_l1"}, inplace=True)
-    if t_cat2 and t_cat2 != "category_l2": chunk.rename(columns={t_cat2: "category_l2"}, inplace=True)
-    if t_cat3 and t_cat3 != "category_l3": chunk.rename(columns={t_cat3: "category_l3"}, inplace=True)
-
-    # Transaction id
-    if t_txid and t_txid in chunk.columns:
-        chunk["transaction_id"] = chunk[t_txid].apply(ensure_uuid)
-    else:
-        chunk["transaction_id"] = [str(uuid.uuid4()) for _ in range(len(chunk))]
-
-    # Timestamp
-    if t_ts and t_ts in chunk.columns:
-        # Try to parse; replace NaT with synthetic
-        parsed = pd.to_datetime(chunk[t_ts], errors="coerce", utc=True)
-        chunk["timestamp"] = [ (pd_ts.isoformat().replace("+00:00","Z") if pd.notna(pd_ts) else synth_time())
-                               for pd_ts in parsed ]
-    else:
-        chunk["timestamp"] = [synth_time() for _ in range(len(chunk))]
-
-    # Keep only canonical columns in final shape
-    keep_cols = [
-        "transaction_id","timestamp","user_id",
-        "first_name","last_name","email","address",
-        "category_l1","category_l2","category_l3",
-        "quantity","unit_price","total_price",
-    ]
-    tx_rows.append(chunk[keep_cols])
-
-# Concatenate and cap to TARGET_TX
-tx_expanded = (pd.concat(tx_rows, ignore_index=True) if tx_rows else pd.DataFrame(columns=[
-    "transaction_id","timestamp","user_id","first_name","last_name","email","address",
-    "category_l1","category_l2","category_l3","quantity","unit_price","total_price"
-])).iloc[:TARGET_TX].copy()
-
-# Final tidy: types/strings
-tx_expanded["transaction_id"] = tx_expanded["transaction_id"].apply(ensure_uuid)
-tx_expanded["timestamp"] = tx_expanded["timestamp"].apply(lambda s: (s or synth_time()))
-tx_expanded["quantity"] = tx_expanded["quantity"].apply(lambda q: int(max(1, safe_int(q, 1))))
-tx_expanded["unit_price"] = tx_expanded["unit_price"].apply(lambda p: round(safe_float(p, 1.0), 2))
-tx_expanded["total_price"] = (tx_expanded["unit_price"].astype(float) * tx_expanded["quantity"].astype(int)).round(2)
+tx_expanded = pd.DataFrame(tx_rows)
+keep_cols = [
+    "transaction_id","timestamp","user_id",
+    "first_name","last_name","email","address",
+    "category_l1","category_l2","category_l3",
+    "quantity","unit_price","total_price",
+]
+tx_expanded = tx_expanded[keep_cols]
 
 # ------------- save -------------
 OUT_CUSTOMERS.parent.mkdir(parents=True, exist_ok=True)
@@ -308,3 +299,13 @@ tx_expanded.to_csv(OUT_TX, index=False)
 
 print(f"Wrote {len(cust_expanded):,} customers -> {OUT_CUSTOMERS}")
 print(f"Wrote {len(tx_expanded):,} transactions -> {OUT_TX}")
+
+# Print distribution stats
+tx_per_customer = tx_expanded.groupby('user_id').size()
+print(f"Transaction distribution:")
+print(f"  Min transactions per customer: {tx_per_customer.min()}")
+print(f"  Max transactions per customer: {tx_per_customer.max()}")
+print(f"  Average transactions per customer: {tx_per_customer.mean():.1f}")
+print(f"  Customers with 1 transaction: {(tx_per_customer == 1).sum()}")
+print(f"  Customers with 5+ transactions: {(tx_per_customer >= 5).sum()}")
+print(f"  Customers with 10 transactions: {(tx_per_customer == 10).sum()}")

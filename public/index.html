@@ -153,8 +153,8 @@
       const prev = btn.innerText; btn.disabled = true; btn.innerText = 'Loading…';
       try {
         const data = await makeRequest('/redis/load-sample-data', 'POST', {
-          customers_csv:'datafiles/customers_with_id.csv',
-          transactions_csv:'datafiles/transactions.csv',
+          customers_csv:'datafiles/customers_expanded.csv',
+          transactions_csv:'datafiles/transactions_expanded.csv',
           reset:true
         });
         showToast(data.message || 'Loaded.', 'success');
@@ -190,22 +190,55 @@
       }catch(e){}
     }   
 
-    async function getRedisStats(){
+    async function getRedisStats() {
       const data = await makeRequest('/redis-stats');
-      const s = data.redis_stats || {};
+
+      const stats = data?.redis_stats || {};
+      const conn  = data?.connection  || {};
+
+      // Mask password in redis_url, e.g. redis://user:****@host:port/db
+      const maskedUrl = typeof conn.redis_url === 'string'
+        ? conn.redis_url.replace(/:\/\/([^:@/]*):([^@/]+)@/, '://$1:********@')
+        : '—';
+
       let html = '<h2>⚡ Redis Instance Statistics</h2>';
-      html += '<div class="redis-info"><h3>📊 Performance Metrics</h3>';
-      html += row('Redis Version', s.redis_version);
-      html += row('Connected Clients', fmtInt(s.connected_clients));
-      html += row('Memory Used', s.used_memory_human);
-      html += row('Total Commands', fmtInt(s.total_commands_processed));
-      html += row('Keyspace Hits', fmtInt(s.keyspace_hits));
-      html += row('Keyspace Misses', fmtInt(s.keyspace_misses));
-      html += row('Uptime', `${Math.floor((s.uptime_in_seconds||0)/3600)} hours`);
-      html += row('Database Keys', fmtInt(s.db_keys));
+
+      // === Connection section ===
+      html += '<div class="redis-info">';
+      html += '<h3>🔌 Connection</h3>';
+      html += row('Host',        conn.host);
+      html += row('Port',        conn.port);
+      html += row('DB Index',    conn.db);
+      html += row('Resolved IP', conn.resolved_ip);
+      html += row('URL',         maskedUrl);
       html += '</div>';
+
+      // === Performance Metrics ===
+      html += '<div class="redis-info"><h3>📊 Performance Metrics</h3>';
+      html += row('Redis Version',        stats.redis_version);
+      html += row('Connected Clients',    fmtIntSafe(stats.connected_clients));
+      html += row('Memory Used',          stats.used_memory_human);
+      html += row('Total Commands',       fmtIntSafe(stats.total_commands_processed));
+      html += row('Keyspace Hits',        fmtIntSafe(stats.keyspace_hits));
+      html += row('Keyspace Misses',      fmtIntSafe(stats.keyspace_misses));
+      html += row('Uptime',               typeof stats.uptime_in_seconds === 'number'
+                                          ? `${Math.floor(stats.uptime_in_seconds / 3600)} hours`
+                                          : '—');
+      html += row('Database Keys',        fmtIntSafe(stats.db_keys));
+      html += '</div>';
+
       showResults(html);
-      function row(k,v){return `<div class="redis-stat"><span>${k}:</span><span>${v ?? '—'}</span></div>`;}
+
+      // helpers
+      function row(k, v) {
+        const val = (v ?? v === 0) ? v : '—';
+        return `<div class="redis-stat"><span>${k}:</span><span>${val}</span></div>`;
+      }
+      function fmtIntSafe(n) {
+        // Use your existing fmtInt if present, else fallback
+        if (typeof fmtInt === 'function') return fmtInt(n);
+        return (typeof n === 'number') ? n.toLocaleString() : (n ?? '—');
+      }
     }
 
     // Retail report
@@ -252,19 +285,29 @@
       carts.forEach(cart=>{
         const items = Array.isArray(cart.items)?cart.items:[];
         h += `<div class="cart">
-                <div class="cart-h"><strong>${safe(cart.client_name)}</strong>
-                  <span>• ${fmtInt(cart.items_count)} items</span>
-                  <span>• ${fmtMoney(cart.cart_value)}</span>
+                <div class="cart-h">
+                  <strong>${safe(cart.client_name)}</strong>
+                  <div>
+                    <span>${fmtInt(cart.items_count)} items</span>
+                    <span style="margin-left: 12px;">${fmtMoney(cart.cart_value)}</span>
+                  </div>
                 </div>
                 <table class="table tight">
-                  <thead><tr><th>Item</th><th>Category</th><th>Qty</th><th>Avg Price</th></tr></thead>
+                  <thead>
+                    <tr>
+                      <th style="width: 40%;">Item</th>
+                      <th style="width: 25%;">Category</th>
+                      <th style="width: 15%; text-align: center;">Qty</th>
+                      <th style="width: 20%; text-align: right;">Avg Price</th>
+                    </tr>
+                  </thead>
                   <tbody>
                     ${items.map(i=>`
                       <tr>
-                        <td>${safe(i.name)}</td>
-                        <td>${safe(i.category)}</td>
-                        <td>${fmtInt(i.quantity)}</td>
-                        <td>${fmtMoney(i.price)}</td>
+                        <td style="width: 40%;">${safe(i.name)}</td>
+                        <td style="width: 25%;">${safe(i.category)}</td>
+                        <td style="width: 15%; text-align: center;">${fmtInt(i.quantity)}</td>
+                        <td style="width: 20%; text-align: right;">${fmtMoney(i.price)}</td>
                       </tr>`).join('')}
                   </tbody>
                 </table>
@@ -383,5 +426,65 @@
     // Default view
     window.addEventListener('load', getRedisStats);
   </script>
+  <style>
+.chat-fab{
+  position:fixed; right:20px; bottom:20px; width:56px; height:56px;
+  border-radius:50%; background:#667eea; color:#fff; display:flex; align-items:center; justify-content:center;
+  box-shadow:0 6px 20px rgba(0,0,0,.25); cursor:pointer; font-size:24px; z-index:9999;
+}
+.chat-panel{
+  position:fixed; right:20px; bottom:90px; width:320px; max-height:60vh; background:#fff; border-radius:12px;
+  box-shadow:0 12px 30px rgba(0,0,0,.25); display:none; flex-direction:column; overflow:hidden; z-index:9999;
+}
+.chat-header{background:#667eea; color:#fff; padding:10px 12px; font-weight:600}
+.chat-body{padding:10px; overflow:auto; min-height:180px}
+.chat-input{display:flex; gap:6px; padding:10px; border-top:1px solid #eee}
+.chat-input input{flex:1; padding:8px 10px; border:1px solid #ddd; border-radius:8px}
+.chat-input button{padding:8px 12px; border:none; background:#667eea; color:#fff; border-radius:8px; cursor:pointer}
+.msg{margin:6px 0; padding:8px 10px; border-radius:10px; max-width:80%;}
+.msg.user{background:#e9f0ff; align-self:flex-end}
+.msg.bot{background:#f6f6f6; align-self:flex-start}
+</style>
+
+<div class="chat-panel" id="chatPanel">
+  <div class="chat-header">Chat (Ollama)</div>
+  <div class="chat-body" id="chatBody"></div>
+  <div class="chat-input">
+    <input id="chatText" placeholder="Ask me anything…" />
+    <button onclick="sendChat()">Send</button>
+  </div>
+</div>
+<div class="chat-fab" onclick="toggleChat()">💬</div>
+
+<script>
+function toggleChat(){
+  const p = document.getElementById('chatPanel');
+  p.style.display = (p.style.display === 'flex') ? 'none' : 'flex';
+  if (p.style.display === 'flex') document.getElementById('chatText').focus();
+}
+function addMsg(text, who){
+  const b = document.getElementById('chatBody');
+  const d = document.createElement('div');
+  d.className = `msg ${who}`;
+  d.textContent = text;
+  b.appendChild(d);
+  b.scrollTop = b.scrollHeight;
+}
+async function sendChat(){
+  const i = document.getElementById('chatText');
+  const msg = i.value.trim();
+  if(!msg) return;
+  i.value = '';
+  addMsg(msg, 'user');
+  try{
+    const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message: msg})});
+    const data = await res.json();
+    if (data.ok) addMsg(data.reply || '(no reply)', 'bot');
+    else addMsg(`Error: ${data.error||'unknown'}`, 'bot');
+  }catch(e){
+    addMsg(`Error: ${e.message}`, 'bot');
+  }
+}
+</script>
 </body>
 </html>
