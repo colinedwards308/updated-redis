@@ -12,8 +12,14 @@ from .db_bootstrap import ensure_schema
 # Stdlib
 from time import perf_counter
 import math
-import os
 import pathlib
+import os, socket
+from urllib.parse import urlsplit
+from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+import requests, os, logging
+
+log = logging.getLogger("uvicorn.error")
 
 # SQLAlchemy
 from sqlalchemy.orm import Session
@@ -79,14 +85,55 @@ def _wrap(payload: dict, started: float, *, cached: bool | None = None, ttl: int
 def _startup():
     create_schema()
 
+class ChatRequest(BaseModel):
+    message: str
 # -------------------------------------------------------
 # 0) Redis stats  (UI calls /api/redis-stats)
 # -------------------------------------------------------
-import os, socket
-from urllib.parse import urlsplit
-from fastapi import FastAPI
+@app.post("/api/chat")
+def chat_endpoint(body: ChatRequest):
+    msg = (body.message or "").strip()
+    if not msg:
+        return JSONResponse({"ok": False, "error": "Empty message"}, status_code=400)
 
-app = FastAPI()
+    # ✅ Defaults that match your box
+    model = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+    # IMPORTANT: keep this as the BASE URL (no /api/* here)
+    base = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    url  = f"{base}/api/generate"
+
+    payload = {"model": model, "prompt": msg, "stream": False}
+
+    try:
+        r = requests.post(url, json=payload, timeout=60)
+        if r.status_code >= 400:
+            # Show the body so 404 "model not found" is obvious
+            try:
+                err_body = r.json()
+            except Exception:
+                err_body = {"raw": r.text[:500]}
+            log.error("[chat] Ollama error %s: %s", r.status_code, err_body)
+            # If it looks like model-not-found, return a friendly hint
+            if r.status_code == 404:
+                return JSONResponse(
+                    {"ok": False, "error": f"Ollama 404: {err_body}. "
+                                           f"Check OLLAMA_MODEL='{model}' or run: ollama pull {model}"},
+                    status_code=502
+                )
+            return JSONResponse({"ok": False, "error": f"Ollama {r.status_code}: {err_body}"}, status_code=502)
+
+        data = r.json()
+        reply = (data.get("response") or "").strip() or "(no reply)"
+        log.info("[chat] model=%s chars_in=%d chars_out=%d", model, len(msg), len(reply))
+        return {"ok": True, "reply": reply}
+
+    except requests.Timeout:
+        log.exception("Chat timeout")
+        return JSONResponse({"ok": False, "error": "Ollama timed out"}, status_code=504)
+    except Exception as e:
+        log.exception("Chat error")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
 
 @app.get("/api/redis-stats")
 def redis_stats():
