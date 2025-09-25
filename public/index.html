@@ -462,6 +462,7 @@ function toggleChat(){
   p.style.display = (p.style.display === 'flex') ? 'none' : 'flex';
   if (p.style.display === 'flex') document.getElementById('chatText').focus();
 }
+
 function addMsg(text, who){
   const b = document.getElementById('chatBody');
   const d = document.createElement('div');
@@ -470,21 +471,67 @@ function addMsg(text, who){
   b.appendChild(d);
   b.scrollTop = b.scrollHeight;
 }
+
+function showThinking(){
+  removeThinking();
+  const b = document.getElementById('chatBody');
+  const d = document.createElement('div');
+  d.className = 'msg bot thinking';
+  d.id = 'thinking';
+  d.innerHTML = `Thinking<span class="dotdotdot"></span><span class="dotdotdot"></span><span class="dotdotdot"></span>`;
+  b.appendChild(d);
+  b.scrollTop = b.scrollHeight;
+}
+function removeThinking(){
+  const t = document.getElementById('thinking');
+  if (t) t.remove();
+}
+
 async function sendChat(){
-  const i = document.getElementById('chatText');
-  const msg = i.value.trim();
+  const input = document.getElementById('chatText');
+  const btns  = document.querySelectorAll('.chat-input button');
+  const msg = input.value.trim();
   if(!msg) return;
-  i.value = '';
+
+  // reset field and show user's message
+  input.value = '';
   addMsg(msg, 'user');
+
+  // lock UI + thinking indicator
+  btns.forEach(b=> b.disabled = true);
+  input.disabled = true;
+  showThinking();
+
   try{
-    const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message: msg})});
-    const data = await res.json();
+    const res = await fetch('/api/chat', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ message: msg })
+    });
+    const data = await res.json().catch(()=> ({}));
+    removeThinking();
     if (data.ok) addMsg(data.reply || '(no reply)', 'bot');
-    else addMsg(`Error: ${data.error||'unknown'}`, 'bot');
+    else addMsg(`Error: ${data.error || 'unknown'}`, 'bot');
   }catch(e){
+    removeThinking();
     addMsg(`Error: ${e.message}`, 'bot');
+  }finally{
+    input.disabled = false;
+    btns.forEach(b=> b.disabled = false);
+    input.focus();
   }
 }
+
+window.addEventListener('DOMContentLoaded', () => {
+  const input = document.getElementById('chatText');
+  input.addEventListener('keydown', (e) => {
+    // Submit on Enter (ignore Shift+Enter just in case)
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChat();
+    }
+  });
+}); 
 </script>
 </body>
 </html>
